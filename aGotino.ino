@@ -6,10 +6,15 @@
       * listen on serial port for basic LX200 commands (INDI LX200 Basic, SkySafari, Stellarium etc)
       * listen on serial port for aGotino commands
       * ST4 port support
+      
+      
+   Modification made by lethalcobra:
+   
+      * added hand controller with I2C protocol with PS2 analog joystick (dual-speed movement to each direction) and LED direction lights feedback for manual movement
+         with showing the speed as well (solid light or blinking)
 
-    Command set and latest updates at https://github.com/mappite/aGotino
-    
-    by gspeed @ astronomia.com / qde / cloudynights.com forum
+    Original credits are going to:    
+     gspeed @ astronomia.com / qde / cloudynights.com forum
     This code is free software under GPL v3 License use at your risk and fun ;)
 
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
@@ -17,29 +22,43 @@
    How to calculate STEP_DELAY to drive motor at right sidereal speed for your mount
 
    Worm Ratio                  144   // 144 eq5/exos2, 135 heq5, 130 eq3-2
-   Other (Pulley/Gear) Ratio     2.5 // depends on your pulley setup e.g. 40T/16T = 2.5
-   Steps per revolution        400   // or usually 200 depends on your motor
-   Microstep                    32   // depends on driver
+   Other (Pulley/Gear) Ratio     8.73 // depends on your pulley setup e.g. 40T/16T = 2.5        32T /19T=1.68; 5.181875 a bolygomu attetele
+   Steps per revolution        200   // or usually 200 depends on your motor
+   Microstep                    16   // depends on driver
 
-   MICROSTEPS_PER_DEGREE_RA  12800   // = WormRatio*OtherRatio*StepsPerRevolution*Microsteps/360
+   MICROSTEPS_PER_DEGREE_RA  11174,4   // = WormRatio*OtherRatio*StepsPerRevolution*Microsteps/360
                                      // = number of microsteps to rotate the scope by 1 degree
 
-   STEP_DELAY                18699   // = (86164/360)/(MicroSteps per Degree)*1000000
+                                     calculated value makes the tracking slow
+
+                             11781   corrigated value        
+
+   STEP_DELAY                21419   // = (86164/360)/(MicroSteps per Degree)*1000000
                                      // = microseconds to advance a microstep at 1x
                                      // 86164 is the number of secs for earth 360deg rotation (23h56m04s)
+
+
+                                     // motor/bolygomu attetel: 5,181875 : 1, 1 teljes kör 16 microstellel: 16581 lepes
+
+                             20316     corrigated value
+
 
  * Update the values below to match your mount/gear ratios and your preferences: 
  * * * * * * */
 
-const unsigned long STEP_DELAY = 18699;                // see above calculation
-const unsigned long MICROSTEPS_PER_DEGREE_RA  = 12800; // see above calculation
+/* The code was extended by "lethalcobra" with I2C based stand alone hand controller */
+
+
+const unsigned long STEP_DELAY = 20316;               // see above calculation
+
+const unsigned long MICROSTEPS_PER_DEGREE_RA  = 11781; // see above calculation
 const unsigned long MICROSTEPS_PER_DEGREE_DEC = MICROSTEPS_PER_DEGREE_RA; // calculate correct value if DEC gears/worm/microsteps differs from RA ones
 
-const unsigned long MICROSTEPS_RA  = 32; // RA  Driver Microsteps
-const unsigned long MICROSTEPS_DEC = 32; // DEC Driver Microsteps
+const unsigned long MICROSTEPS_RA  = 16; // RA  Driver Microsteps
+const unsigned long MICROSTEPS_DEC = 16; // DEC Driver Microsteps
 
 const long SERIAL_SPEED = 9600;          // serial interface baud. Make sure your computer/phone matches this
-long MAX_RANGE = 1800;                   // default max slew range in deg minutes (1800'=30°). See +range command
+long MAX_RANGE = 1800;                   // default max slew range in deg minutes (1800'=30Â°). See +range command
 
 // Motor clockwise direction: HIGH is for tracking as per original design (W)
 //          change to LOW if you inverted wirings or motor position or... 
@@ -48,6 +67,7 @@ int DEC_DIR  = HIGH;
 
 unsigned int  SLOW_SPEED      = 8;      // RA&DEC slow motion speed (button press) - times the sidereal speed
 const    int  SLOW_SPEED_INC  = 4;      // Slow motion speed increment at +speed command
+
 
 unsigned long STEP_DELAY_SLEW = 1200;   // Slewing Pulse timing in micros (the higher the pulse, the slower the speed)
                                         // don't change this to too low values otherwise your scope may take off as an helicopter.
@@ -68,7 +88,8 @@ const int decEnableMicroStepsPin = 9;
 const int decSleepPin = 10;
 
 /* Experimental: Uncomment the line below to enable ST4 Port on A0-A3 pins */
-// #define ST4
+
+//#define ST4
 
 #ifdef ST4
 unsigned int ST4_PULSE_FACTOR = 20;     // st4 pulse factor, increase to increase period lenght (i.e. decrease speed). Range 10-30
@@ -78,12 +99,39 @@ const int st4EastPin  = A2;
 const int st4WestPin  = A3;
 #endif
 
+
+#include "catalogs.h" // load objects for aGoto protocol (Star List, Messier, NGC)
+
+/* Definition block for the I2C hand control unit */
+
+#include "Wire.h"
+#include "PCF8574.h" // Required for PCF8574
+
+byte Northled=0;            //definition of the pin-variables for PCF8574
+byte Southled=1;
+byte Westled=2;
+byte Eastled=4;
+byte lowspeedled=5;     //used for a previous version, in this one this is not implemented
+byte highspeedled=6;    //used for a previous version, in this one this is not implemented
+byte speedswitchpin=7;  //used for a previous version, in this one this is not implemented
+byte intswitch=3;       //used for a previous version, in this one this is not implemented
+
+
+/* Define PCF8591 I2C ADC */
+#define PCF8591 (0x90 >> 1) // I2C bus address
+#define ADC0 0x00 // control bytes for reading individual ADCs (ADC 0 and ADC1)
+#define ADC1 0x01
+
+byte x_axis, y_axis, flash, switcher;   //definition of variables for hanbd conroller
+byte counter;
+
+boolean man_move = false;             //variable for manual slewing movements
+
 /*
  * It is safe to keep the below untouched
  * 
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#include "catalogs.h" // load objects for aGoto protocol (Star List, Messier, NGC)
 
 // Number of Microsteps to move RA by 1hour
 const unsigned long MICROSTEPS_PER_HOUR  = MICROSTEPS_PER_DEGREE_RA * 360 / 24;
@@ -103,7 +151,7 @@ boolean decStepPinStatus   = false;// true = HIGH, false = LOW
 boolean SLEWING = false; // true while it is slewing to block AR tracking
 
 const long DAY_SECONDS =  86400; // secs in a day
-const long NORTH_DEC   = 324000; // 90°
+const long NORTH_DEC   = 324000; // 90Â°
 
 // Current coords in Secs (default to true north)
 long currRA  = 0;     
@@ -143,6 +191,17 @@ unsigned int  decPlayIdx     = 0; // pulse index, Dec will accellerate for first
 String _aGotino = "aGotino";
 const unsigned long _ver = 210708;
 
+  /** PCF8574 instance  for the hand controller */
+  PCF8574 expander;
+
+    //Function definition for downscale the joystick values to 19 values on each axes 
+ int stickValue(int data) {
+  return (data * 19 / 256);
+ }
+
+ 
+
+
 void setup() {
   Serial.begin(SERIAL_SPEED);
   Serial.print(_aGotino);
@@ -168,6 +227,32 @@ void setup() {
   pinMode(raButtonPin,  INPUT_PULLUP);
   pinMode(decButtonPin, INPUT_PULLUP);
 
+/* Block for I2C hand controller setup */
+
+  /* startup I2C PCF8574 bus extender */
+     expander.begin(0x39);
+    Serial.print("PCF8574 init");
+
+  Wire.beginTransmission(PCF8591); // wake up PCF8591
+  Serial.print("PCF8591 init");
+  
+  /* Definition of PCF8574 pins */
+  expander.pinMode(Northled, OUTPUT);
+  expander.pinMode(Southled, OUTPUT);
+  expander.pinMode(Westled, OUTPUT);
+  expander.pinMode(intswitch, INPUT_PULLUP);    //not implemented
+  expander.pinMode(Eastled, OUTPUT);
+  expander.pinMode(lowspeedled, OUTPUT);        //not implemented
+  expander.pinMode(highspeedled, OUTPUT);       //not implemented
+  expander.pinMode(speedswitchpin, INPUT_PULLUP); //not implemented
+    Serial.println("PCF8591 pins defined");
+  
+  expander.set();         //switch off all LEDs for debug
+
+
+
+ 
+
   #ifdef ST4
   // init ST4 port pins as well
   pinMode(st4NorthPin, INPUT_PULLUP);
@@ -187,6 +272,9 @@ void setup() {
   lx200DEC[3] = char(223); // set correct char in string as per earlier specs - FIXME: this should not be needed anymore
   Serial.println(" ready.");
 }
+
+
+
 
 /* 
  *  Timer to trigger RA driver pulse
@@ -362,13 +450,17 @@ void slewRaDecBySteps(unsigned long raSteps, unsigned long decSteps) {
   in = 0; // reset the  input buffer read index
   
   for (unsigned long i = 0; (i < raSteps || i < decSteps) ; i++) {
-    if ((i<100)) { // Accellerate during inital 100 steps from MAX_DELAY to STEP_DELAY_SLEW
-      delaySlew = MAX_DELAY-( (MAX_DELAY-STEP_DELAY_SLEW)/100*i);
-    } else if ( (i>raSteps-100 && i<raSteps)|| (i>decSteps-100 && i<decSteps)) {
-      delaySlew = STEP_DELAY_SLEW*2;// twice as slow in last 100 steps before a motor is about to stop 
-    } else { 
-      delaySlew = STEP_DELAY_SLEW; // full speed
-    } 
+    
+
+      if ((i<100) && man_move == false) { // Accellerate during inital 100 steps from MAX_DELAY to STEP_DELAY_SLEW
+        delaySlew = MAX_DELAY-( (MAX_DELAY-STEP_DELAY_SLEW)/100*i);
+      } else if ( (i>raSteps-100 && i<raSteps && man_move ==false)|| (i>decSteps-100 && i<decSteps && man_move == false)) {
+        delaySlew = STEP_DELAY_SLEW*2;// twice as slow in last 100 steps before a motor is about to stop 
+      } else { 
+        delaySlew = STEP_DELAY_SLEW; // full speed
+      }     
+      
+
     
     if (i < raSteps)  { digitalWrite(raStepPin,  HIGH); }
     if (i < decSteps) { digitalWrite(decStepPin, HIGH); }
@@ -821,6 +913,24 @@ void moveDecHalt() {
       decSleep(true); // sleep
 }
 
+void readStick(){
+
+ Wire.beginTransmission(PCF8591); // wake up PCF8591
+     Wire.write(ADC0); // control byte - read ADC0
+     Wire.endTransmission(); // end tranmission
+     Wire.requestFrom(PCF8591, 2);
+     x_axis=Wire.read();
+     x_axis=Wire.read();
+     delay(10);
+     Wire.beginTransmission(PCF8591); // wake up PCF8591
+     Wire.write(ADC1); // control byte - read ADC1
+     Wire.endTransmission(); // end tranmission
+     Wire.requestFrom(PCF8591, 2);
+     y_axis=Wire.read();
+     y_axis=Wire.read();
+  
+}
+
 
 /*
  * main loop
@@ -866,7 +976,7 @@ void loop() {
     // note: actual speed is driven by decTargetDelay
     if (decState == DEC_HALT) {
       moveDecNorth();
-    } else if (decState == DEC_NORTH) {
+  } else if (decState == DEC_NORTH) {
       moveDecSouth();
     } else if  (decState == DEC_SOUTH) {
       moveDecHalt();
@@ -960,9 +1070,183 @@ void loop() {
       if (in++>20) in = 0; // prepare for next char or reset buffer if max lenght reached
     } 
   }
+
+/* Routin for I2C hand controller */
+
+  
+      readStick();
+    
+      LEDflash();
+
+     while ( stickValue(x_axis)<7 || stickValue(x_axis)>11 || stickValue(y_axis)<7 || stickValue(y_axis)>11){
+
+  man_move = true;                    //set man_move variable to true, indicating manual slewing operation, to exclude the acceleration and deceleration during slewing
+
+ if (decState != DEC_HALT) {          //move Dec axis if necessery
+    decPlay();
+  }
+
+    
+
+      readStick();
+      
+    
+    /* Checking X axis of the joystick */
+     
+  
+    
+       if(stickValue(x_axis)<1){                   //X axis lowend full
+        expander.digitalWrite(Southled, flash);
+        
+ 
+           digitalWrite(decEnableMicroStepsPin, LOW);     //switch to high speed
+           
+           moveDecSouth();                                 //Set motion to South
+  
+          slewRaDecBySteps(0, 50);                        //Call Slew routine for 50 steps on Dec
+            
+        } 
+          else if(stickValue(x_axis)<=7 && stickValue(x_axis)>2){  //X axis lowend moderate
+        expander.digitalWrite(Southled, LOW);
+
+
+        digitalWrite(decEnableMicroStepsPin, HIGH);     //switch to low speed
+               
+        moveDecSouth();                                 //Set motion to South
+  
+          slewRaDecBySteps(0, 50);                        //Call Slew routine for 50 steps on Dec
+              
+      }
+         else if (stickValue(x_axis)>=11 && stickValue(x_axis)<16){    //X axis highend moderate
+        expander.digitalWrite(Northled, LOW);
+
+          digitalWrite(decEnableMicroStepsPin, HIGH);     //switch to low speed
+        
+          moveDecNorth();                                 //Set motion to North
+  
+          slewRaDecBySteps(0, 50);                        //Call Slew routine for 50 steps on Dec
+
+          
+
+    }
+
+             
+      
+          else if(stickValue(x_axis)>17){
+        expander.digitalWrite(Northled, flash);                    //X axis highend full
+
+          digitalWrite(decEnableMicroStepsPin, LOW);               //switch to high speed
+  
+          moveDecNorth();                                          //Set motion to North
+  
+          slewRaDecBySteps(0, 50);                                 //Call Slew routine for 50 steps on Dec
+
+      
+      }    
+    
+    /* Checking X axis of the joystick */
+     
+       if(stickValue(y_axis)<1){                                    //Y axis lowend full
+        expander.digitalWrite(Eastled, flash);
+
+        digitalWrite(raEnableMicroStepsPin, LOW);                   //switch to high speed
+        
+        moveRaEast();                                               //Set motion Ra East
+
+        slewRaDecBySteps(50, 0);                                    //Call Slew routine for 50 steps on Ra
+
+      
+        } 
+        else if(stickValue(y_axis)>=11 && stickValue(y_axis)<16){  //Y axis lowend moderate
+        expander.digitalWrite(Westled, LOW);
+
+
+        digitalWrite(raEnableMicroStepsPin, HIGH);                  //switch to slow speed
+          
+        moveRaWest();                                               //Set motion Ra West
+
+        slewRaDecBySteps(50, 0);                                    //Call Slew routine for 50 steps on Ra
+
+       
+        
+      }
+        else if (stickValue(y_axis)<=7 && stickValue(y_axis)>2){    //Y axis highend moderate
+        expander.digitalWrite(Eastled, LOW);
+
+        digitalWrite(raEnableMicroStepsPin, HIGH);                  //switch to slow speed
+   
+        
+        moveRaEast();                                               //Set motion Ra East
+
+        slewRaDecBySteps(50, 0);                                    //Call Slew routine for 50 steps on Ra
+
+       
+      }
+        else if(stickValue(y_axis)>17){
+        expander.digitalWrite(Westled, flash);                        //Y axis highend full
+
+          digitalWrite(raEnableMicroStepsPin, LOW);                   //switch to high speed
+      
+          moveRaWest();                                               //Set motion Ra West
+
+          slewRaDecBySteps(50, 0);                                    //Call Slew routine for 50 steps on Ra
+
+
+         }    
+   
+    if (stickValue(x_axis)>6 && stickValue(x_axis)<12 && stickValue(y_axis)>6 && stickValue(y_axis)<12) {   //X and Y axis middle pos
+        expander.digitalWrite(Southled, HIGH);           //Switch off direction LEDs
+        expander.digitalWrite(Northled, HIGH);
+        expander.digitalWrite(Westled, HIGH);        
+        expander.digitalWrite(Eastled, HIGH);
+
+        man_move = false;
+
+        digitalWrite(decEnableMicroStepsPin, HIGH);
+        digitalWrite(raEnableMicroStepsPin, HIGH);
+        
+        moveDecHalt();                                 //Stop Dec axle
+
+        POWER_SAVING_ENABLED  = true;
+        
+        moveRaTracking();                              //Switch on Ra tracking
+
+        Serial.println("Tracking on");
+     
+            
+      }
+
+   
+    LEDflash();
+
+  decLastTime = micros(); // reset time, however it is not solving the "Dec too late" error...
+  
+    }
+
+
+
+      
+
+
+    
+
 }
 
 // Helpers to write on serial when DEBUG is active
 void printLog(  String s)         { if (DEBUG) { Serial.print(":");Serial.println(s); } }
 void printLogL( long l)           { if (DEBUG) { Serial.print(":");Serial.println(l); } }
 void printLogUL(unsigned long ul) { if (DEBUG) { Serial.print(":");Serial.println(ul);} }
+
+  /* incrementing the variable, using for flashing the LEDs if necessary */
+void LEDflash(){
+   
+ if (counter<=127){ 
+  flash=HIGH;
+  
+  }else if (counter>127){
+  flash=LOW;
+  
+ }
+counter=counter+50;
+
+}
