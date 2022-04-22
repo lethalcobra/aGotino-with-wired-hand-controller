@@ -3,7 +3,7 @@
 
 This project is a fork of the great "aGotino" project, currently it has some problems, it is under revision.
 
-In this projetc I vanted to add an old school wired hand controller to the aGotion. I decided to do this using components with I2C communication protocol, since this way I need only a 4-line cable for the communication (for example, an old telephone handset cable). For the direction control, a PS2 analouge joystick was used, this way it is easy to achive a dual speed movement control to each direction. I also included an I2C serial-parallel port extender, which is used to light up LEDs to serve as feedback for the joystick movements. At "low speed" the direction LED lights up solid, at "high speed" it flashes.
+In this project I wanted to add an old school wired hand controller to the aGotion. I decided to do this using components with I2C communication protocol, since this way I need only a 4-line cable for the communication (for example, an old telephone handset cable). For the direction control, a PS2 analouge joystick was used, this way it is easy to achive a dual speed movement control to each direction. I also included an I2C serial-parallel port extender, which is used to light up LEDs to serve as feedback for the joystick movements. At "low speed" the direction LED lights up solid, at "high speed" it flashes.
 
 All the other functions are left exactly the same as the original.
 
